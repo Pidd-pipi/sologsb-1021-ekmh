@@ -1,9 +1,9 @@
 import { computed, reactive, ref } from 'vue';
 import { defineStore } from 'pinia';
 import type {
-  AuditRecord, DictionaryEntry, DictionarySnapshot, DuplicatePair, EntryStatus, ReviewComment, VersionRecord
+  AuditRecord, DictionaryEntry, DictionarySnapshot, DuplicatePair, EntryStatus, ReviewComment, ReviewReopenTrigger, VersionRecord
 } from '~/types/dictionary';
-import { findDuplicates } from '~/utils/dictionary';
+import { findDuplicates, reviewFieldLabels, sameContent } from '~/utils/dictionary';
 
 const now = () => new Date().toISOString();
 const uid = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 9)}-${Date.now().toString(36)}`;
@@ -105,16 +105,75 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     if (!entries.some((entry) => entry.id === selectedId.value)) selectedId.value = entries[0]?.id ?? '';
   }
 
-  function commit(action: string, detail: string, entryIds: string[], mutation: () => void) {
+  interface CommitOptions {
+    reviewField?: keyof DictionaryEntry;
+  }
+
+  function commit(action: string, detail: string, entryIds: string[], mutation: () => void, options: CommitOptions = {}) {
+    const before = clone(entries);
+    const trackedEntry = options.reviewField ? entries.find((entry) => entry.id === entryIds[0]) : undefined;
+    const fieldKey = options.reviewField;
+    const beforeValue = trackedEntry && fieldKey ? clone(trackedEntry[fieldKey]) : undefined;
+    const resolvedComments = trackedEntry && fieldKey
+      ? trackedEntry.reviewerComments.filter((comment) => comment.field === fieldKey && comment.status === 'resolved')
+      : [];
+    resolvedComments.forEach((comment) => {
+      if (!comment.resolvedValue) comment.resolvedValue = JSON.stringify(beforeValue);
+    });
+    const reopenedCommentIds = new Set(trackedEntry?.reviewerComments
+      .filter((comment) => comment.field === fieldKey && comment.status === 'open' && comment.reopenTrigger)
+      .map((comment) => comment.id));
+    const wasConfirmed = trackedEntry?.status === 'confirmed';
+    const nextRevision = revision.value + 1;
+    const versionId = uid('version');
+    const at = now();
+    let reopenedCount = 0;
+    let reresolvedCount = 0;
+
     undoStack.value = [...undoStack.value.slice(-49), snapshot()];
     redoStack.value = [];
-    const before = clone(entries);
     mutation();
-    revision.value += 1;
+
+    if (trackedEntry && fieldKey) {
+      const valueAfterEdit = JSON.stringify(trackedEntry[fieldKey]);
+      const trigger: ReviewReopenTrigger = {
+        versionId,
+        revision: nextRevision,
+        field: fieldKey,
+        action,
+        detail,
+        at
+      };
+      trackedEntry.reviewerComments.forEach((comment) => {
+        if (comment.field !== fieldKey) return;
+        const wasResolved = resolvedComments.some((item) => item.id === comment.id);
+        const wasReopened = reopenedCommentIds.has(comment.id);
+        if (wasResolved && comment.resolvedValue !== valueAfterEdit) {
+          comment.status = 'open';
+          comment.reopenTrigger = trigger;
+          reopenedCount += 1;
+        } else if (wasReopened && comment.status === 'open' && comment.resolvedValue === valueAfterEdit) {
+          comment.status = 'resolved';
+          comment.reopenTrigger = undefined;
+          reresolvedCount += 1;
+        }
+      });
+      if (reopenedCount && trackedEntry.status === 'confirmed') trackedEntry.status = 'review';
+    }
+
+    revision.value = nextRevision;
     entries.forEach((entry) => { if (entryIds.includes(entry.id)) entry.updatedAt = now(); });
-    versions.unshift({ id: uid('version'), at: now(), action, detail, entryId: entryIds[0], before });
+
+    const fieldLabel = fieldKey ? (reviewFieldLabels[fieldKey as string] ?? fieldKey) : '';
+    const reviewDetails = [
+      reopenedCount ? `${reopenedCount} 条已解决“${fieldLabel}”意见回到待回复${wasConfirmed ? '，原已确认词条回到待审' : ''}` : '',
+      reresolvedCount ? `${reresolvedCount} 条“${fieldLabel}”意见因内容恢复为解决时原值，重新标记为已解决` : ''
+    ].filter(Boolean).join('；');
+    const finalDetail = reviewDetails ? `${detail}；${reviewDetails}` : detail;
+
+    versions.unshift({ id: versionId, revision: nextRevision, at, action, detail: finalDetail, entryId: entryIds[0], before });
     versions.splice(120);
-    audit.unshift({ id: uid('audit'), at: now(), action, detail, entryIds });
+    audit.unshift({ id: uid('audit'), at, action, detail: finalDetail, entryIds });
     audit.splice(300);
   }
 
@@ -128,8 +187,9 @@ export const useDictionaryStore = defineStore('dictionary', () => {
 
   function updateField<K extends keyof DictionaryEntry>(entryId: string, field: K, value: DictionaryEntry[K], label = String(field)) {
     const entry = entries.find((item) => item.id === entryId);
-    if (!entry || JSON.stringify(entry[field]) === JSON.stringify(value)) return;
-    commit('编辑字段', `${label}发生更新`, [entryId], () => { entry[field] = value; });
+    if (!entry || sameContent(entry[field], value)) return;
+    const fieldLabel = reviewFieldLabels[field as string] ?? label;
+    commit('编辑字段', `${fieldLabel}发生更新`, [entryId], () => { entry[field] = value; }, { reviewField: field });
   }
 
   function setStatus(entryId: string, status: EntryStatus) {
@@ -143,14 +203,15 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     const entry = entries.find((item) => item.id === entryId);
     if (!entry) return;
     const variant = { id: uid('variant'), dialect: '', form: '', pronunciation: '', note: '' };
-    commit('新增方言变体', '添加一条方言变体', [entryId], () => entry.dialectVariants.push(variant));
+    commit('新增方言变体', '添加一条方言变体', [entryId], () => entry.dialectVariants.push(variant), { reviewField: 'dialectVariants' });
   }
 
   function updateVariant(entryId: string, variantId: string, field: 'dialect' | 'form' | 'pronunciation' | 'note', value: string) {
     const entry = entries.find((item) => item.id === entryId);
     const variant = entry?.dialectVariants.find((item) => item.id === variantId);
     if (!entry || !variant || variant[field] === value) return;
-    commit('编辑方言变体', `${field}发生更新`, [entryId], () => { variant[field] = value; });
+    const labels = { dialect: '方言点', form: '词形', pronunciation: '读音', note: '使用说明' };
+    commit('编辑方言变体', `${labels[field]}发生更新`, [entryId], () => { variant[field] = value; }, { reviewField: 'dialectVariants' });
   }
 
   function removeVariant(entryId: string, variantId: string) {
@@ -159,20 +220,21 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     commit('删除方言变体', '移除一条方言变体', [entryId], () => {
       const index = entry.dialectVariants.findIndex((variant) => variant.id === variantId);
       if (index >= 0) entry.dialectVariants.splice(index, 1);
-    });
+    }, { reviewField: 'dialectVariants' });
   }
 
   function addExample(entryId: string) {
     const entry = entries.find((item) => item.id === entryId);
     if (!entry) return;
-    commit('新增例句', '添加一条例句', [entryId], () => entry.examples.push({ id: uid('example'), text: '', translation: '', source: '' }));
+    commit('新增例句', '添加一条例句', [entryId], () => entry.examples.push({ id: uid('example'), text: '', translation: '', source: '' }), { reviewField: 'examples' });
   }
 
   function updateExample(entryId: string, exampleId: string, field: 'text' | 'translation' | 'source', value: string) {
     const entry = entries.find((item) => item.id === entryId);
     const example = entry?.examples.find((item) => item.id === exampleId);
     if (!entry || !example || example[field] === value) return;
-    commit('编辑例句', `${field}发生更新`, [entryId], () => { example[field] = value; });
+    const labels = { text: '例句原文', translation: '例句译文', source: '例句出处' };
+    commit('编辑例句', `${labels[field]}发生更新`, [entryId], () => { example[field] = value; }, { reviewField: 'examples' });
   }
 
   function removeExample(entryId: string, exampleId: string) {
@@ -181,20 +243,21 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     commit('删除例句', '移除一条例句', [entryId], () => {
       const index = entry.examples.findIndex((item) => item.id === exampleId);
       if (index >= 0) entry.examples.splice(index, 1);
-    });
+    }, { reviewField: 'examples' });
   }
 
   function addSource(entryId: string) {
     const entry = entries.find((item) => item.id === entryId);
     if (!entry) return;
-    commit('新增来源', '添加一条文献或录音来源', [entryId], () => entry.sources.push({ id: uid('source'), title: '', citation: '', url: '' }));
+    commit('新增来源', '添加一条文献或录音来源', [entryId], () => entry.sources.push({ id: uid('source'), title: '', citation: '', url: '' }), { reviewField: 'sources' });
   }
 
   function updateSource(entryId: string, sourceId: string, field: 'title' | 'citation' | 'url', value: string) {
     const entry = entries.find((item) => item.id === entryId);
     const source = entry?.sources.find((item) => item.id === sourceId);
     if (!entry || !source || source[field] === value) return;
-    commit('编辑来源', `${field}发生更新`, [entryId], () => { source[field] = value; });
+    const labels = { title: '来源名称', citation: '引用信息', url: '来源链接' };
+    commit('编辑来源', `${labels[field]}发生更新`, [entryId], () => { source[field] = value; }, { reviewField: 'sources' });
   }
 
   function removeSource(entryId: string, sourceId: string) {
@@ -203,13 +266,13 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     commit('删除来源', '移除一条来源', [entryId], () => {
       const index = entry.sources.findIndex((source) => source.id === sourceId);
       if (index >= 0) entry.sources.splice(index, 1);
-    });
+    }, { reviewField: 'sources' });
   }
 
   function setSynonyms(entryId: string, synonyms: string[]) {
     const entry = entries.find((item) => item.id === entryId);
-    if (!entry) return;
-    commit('编辑同义词', `同义词更新为 ${synonyms.join('、')}`, [entryId], () => { entry.synonyms = synonyms; });
+    if (!entry || sameContent(entry.synonyms, synonyms)) return;
+    commit('编辑同义词', `同义词更新为 ${synonyms.join('、') || '空'}`, [entryId], () => { entry.synonyms = synonyms; }, { reviewField: 'synonyms' });
   }
 
   function addComment(entryId: string, field: string, message: string, author = '主审·和老师') {
@@ -230,8 +293,16 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     const entry = entries.find((item) => item.id === entryId);
     const comment = entry?.reviewerComments.find((item) => item.id === commentId);
     if (!entry || !comment) return;
-    commit('处理审校意见', comment.status === 'open' ? '标记为已解决' : '重新打开意见', [entryId], () => {
-      comment.status = comment.status === 'open' ? 'resolved' : 'open';
+    const nextStatus = comment.status === 'open' ? 'resolved' : 'open';
+    commit('处理审校意见', nextStatus === 'resolved' ? '标记为已解决' : '重新打开意见', [entryId], () => {
+      comment.status = nextStatus;
+      if (nextStatus === 'resolved') {
+        comment.resolvedAt = now();
+        comment.resolvedValue = JSON.stringify(entry[comment.field as keyof DictionaryEntry]);
+        comment.reopenTrigger = undefined;
+      } else {
+        comment.reopenTrigger = undefined;
+      }
     });
   }
 

@@ -15,7 +15,13 @@ const duplicateOpen = ref(false);
 const versionsOpen = ref(false);
 const deleteOpen = ref(false);
 const deleteTarget = ref<DictionaryEntry | null>(null);
+const triggerVersionId = ref<string>();
 const statusText = ref('本地数据已同步');
+
+const openVersions = (versionId?: string) => {
+  triggerVersionId.value = versionId;
+  versionsOpen.value = true;
+};
 
 const impacts = computed(() => deleteTarget.value ? referencesToEntry(store.entries, deleteTarget.value) : []);
 
@@ -107,9 +113,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keyboard));
     </section>
 
     <main class="workspace">
-      <EntrySidebar @create="store.createEntry" @duplicates="openDuplicates" @versions="versionsOpen = true" />
+      <EntrySidebar @create="store.createEntry" @duplicates="openDuplicates" @versions="openVersions()" />
       <EntryEditor />
-      <ReviewPanel @versions="versionsOpen = true" />
+      <ReviewPanel @versions="openVersions" />
     </main>
 
     <section class="bottom-bar">
@@ -127,7 +133,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keyboard));
     <ClientOnly>
       <DuplicateMergeDialog v-model="duplicateOpen" :pairs="store.duplicates" />
       <DeleteImpactDialog v-model="deleteOpen" :entry="deleteTarget" :impacts="impacts" @confirm="confirmDelete" />
-      <VersionDrawer v-model="versionsOpen" />
+      <VersionDrawer v-model="versionsOpen" :trigger-version-id="triggerVersionId" />
     </ClientOnly>
   </div>
 </template>

@@ -1,17 +1,16 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { useDictionaryStore } from '~/store/dictionary';
+import { reviewFieldLabels } from '~/utils/dictionary';
 
 const store = useDictionaryStore();
-const emit = defineEmits<{ versions: [] }>();
+const emit = defineEmits<{ versions: [versionId?: string] }>();
 const commentField = ref('definition');
 const commentText = ref('');
 const filter = ref<'all' | 'open' | 'resolved'>('all');
 const entry = computed(() => store.selectedEntry);
-const comments = computed(() => (entry.value?.reviewerComments ?? []).filter((comment) => filter.value === 'all' || comment.status === filter.value));
-const fieldLabels: Record<string, string> = {
-  headword: '词形', pronunciation: '发音', partOfSpeech: '词性', definition: '释义', dialectVariants: '方言变体', examples: '例句', sources: '来源', synonyms: '同义词', notes: '备注'
-};
+const comments = computed(() => (entry.value?.reviewerComments ?? []).filter((comment) => comment.status === filter.value || filter.value === 'all'));
+const fieldLabels = reviewFieldLabels;
 
 const addComment = () => {
   if (!entry.value || !commentText.value.trim()) return;
@@ -27,7 +26,7 @@ const addComment = () => {
       <button class="version-link" @click="emit('versions')">版本 {{ store.versions.length }}</button>
     </div>
     <div class="review-summary">
-      <div><strong>{{ entry.reviewerComments.filter((item) => item.status === 'open').length }}</strong><span>待处理</span></div>
+      <div><strong>{{ entry.reviewerComments.filter((item) => item.status === 'open').length }}</strong><span>待回复</span></div>
       <div><strong>{{ entry.reviewerComments.filter((item) => item.status === 'resolved').length }}</strong><span>已解决</span></div>
       <div><strong>{{ entry.dialectVariants.length }}</strong><span>方言变体</span></div>
     </div>
@@ -37,10 +36,16 @@ const addComment = () => {
       <button :class="{ active: filter === 'resolved' }" @click="filter = 'resolved'">已解决</button>
     </div>
     <div class="comment-list">
-      <article v-for="comment in comments" :key="comment.id" class="comment-card" :class="{ resolved: comment.status === 'resolved' }">
+      <article v-for="comment in comments" :key="comment.id" class="comment-card" :class="{ resolved: comment.status === 'resolved', reopened: comment.status === 'open' && !!comment.reopenTrigger }">
         <header><t-tag size="small" variant="light" :theme="comment.status === 'open' ? 'warning' : 'success'">{{ fieldLabels[comment.field] || comment.field }}</t-tag><span>{{ comment.author }}</span><time>{{ new Date(comment.createdAt).toLocaleDateString('zh-CN') }}</time></header>
         <p>{{ comment.message }}</p>
+        <div v-if="comment.reopenTrigger" class="reopen-notice">
+          <div><strong>修改触发复审</strong><span>r{{ comment.reopenTrigger.revision }} · {{ new Date(comment.reopenTrigger.at).toLocaleString('zh-CN') }}</span></div>
+          <p>{{ comment.reopenTrigger.detail }}</p>
+          <button type="button" @click="emit('versions', comment.reopenTrigger!.versionId)">查看触发版本</button>
+        </div>
         <div v-for="reply in comment.replies" :key="reply.id" class="reply"><strong>{{ reply.author }}</strong><span>{{ reply.message }}</span><time>{{ new Date(reply.createdAt).toLocaleString('zh-CN') }}</time></div>
+        <div v-if="comment.resolvedAt" class="resolve-meta">原解决时间：{{ new Date(comment.resolvedAt).toLocaleString('zh-CN') }}</div>
         <div class="reply-box">
           <t-textarea v-model="store.fieldReplyDrafts[comment.id]" :autosize="{ minRows: 1, maxRows: 3 }" placeholder="逐字段回复这条意见…" />
           <t-button size="small" theme="primary" variant="outline" @click="store.replyComment(entry!.id, comment.id, store.fieldReplyDrafts[comment.id] || ''); store.fieldReplyDrafts[comment.id] = ''">回复</t-button>

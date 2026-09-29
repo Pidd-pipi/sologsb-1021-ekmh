@@ -22,6 +22,15 @@ export interface DictionarySource {
   url: string;
 }
 
+export interface ReviewReopenTrigger {
+  versionId: string;
+  revision: number;
+  field: string;
+  action: string;
+  detail: string;
+  at: string;
+}
+
 export interface ReviewComment {
   id: string;
   field: string;
@@ -29,6 +38,9 @@ export interface ReviewComment {
   message: string;
   status: 'open' | 'resolved';
   createdAt: string;
+  resolvedAt?: string;
+  resolvedValue?: string;
+  reopenTrigger?: ReviewReopenTrigger;
   replies: Array<{ id: string; author: string; message: string; createdAt: string }>;
 }
 
@@ -51,6 +63,7 @@ export interface DictionaryEntry {
 
 export interface VersionRecord {
   id: string;
+  revision?: number;
   at: string;
   action: string;
   detail: string;
