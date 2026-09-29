@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { useDictionaryStore } from '~/store/dictionary';
 
 const visible = defineModel<boolean>({ required: true });
+const highlightId = defineModel<string | undefined>('highlightId');
 const store = useDictionaryStore();
 const revisions = computed(() => store.versions);
+const itemRefs = ref<Record<string, HTMLElement | null>>({});
 const diff = (before: typeof store.entries) => {
   const beforeMap = new Map(before.map((entry) => [entry.id, entry]));
   const afterMap = new Map(store.entries.map((entry) => [entry.id, entry]));
@@ -16,6 +18,12 @@ const diff = (before: typeof store.entries) => {
   const removed = before.filter((entry) => !afterMap.has(entry.id)).length;
   return { changed, removed, added: store.entries.filter((entry) => !beforeMap.has(entry.id)).length };
 };
+
+watch([visible, highlightId], async ([open]) => {
+  if (!open || !highlightId.value) return;
+  await nextTick();
+  window.setTimeout(() => itemRefs.value[highlightId.value!]?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 260);
+});
 </script>
 
 <template>
@@ -23,8 +31,14 @@ const diff = (before: typeof store.entries) => {
     <div class="version-drawer">
       <div class="version-intro"><strong>{{ revisions.length }}</strong><span>个可恢复版本</span><p>每次字段编辑、状态变更、合并或删除都会在提交前保存完整快照。</p></div>
       <div class="version-list">
-        <article v-for="version in revisions" :key="version.id" class="version-item">
-          <div class="version-line"><span class="version-dot" /><time>{{ new Date(version.at).toLocaleString('zh-CN') }}</time></div>
+        <article
+          v-for="version in revisions"
+          :key="version.id"
+          :ref="(el) => { itemRefs[version.id] = (el as HTMLElement | null); }"
+          class="version-item"
+          :class="{ highlight: highlightId === version.id }"
+        >
+          <div class="version-line"><span class="version-dot" /><time>{{ new Date(version.at).toLocaleString('zh-CN') }}</time><t-tag v-if="highlightId === version.id" size="small" theme="warning" variant="light">触发复审</t-tag></div>
           <strong>{{ version.action }}</strong>
           <p>{{ version.detail }}</p>
           <div class="diff-line"><span>新增 {{ diff(version.before).added }}</span><span>修改 {{ diff(version.before).changed }}</span><span>删除 {{ diff(version.before).removed }}</span></div>

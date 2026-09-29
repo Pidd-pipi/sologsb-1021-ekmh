@@ -9,6 +9,11 @@ const now = () => new Date().toISOString();
 const uid = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 9)}-${Date.now().toString(36)}`;
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
+export const FIELD_LABELS: Record<string, string> = {
+  headword: '词形', pronunciation: '发音说明', partOfSpeech: '词性', definition: '释义',
+  dialectVariants: '方言变体', examples: '例句', sources: '来源', synonyms: '同义词', notes: '备注'
+};
+
 const seedEntries = (): DictionaryEntry[] => [
   {
     id: 'entry-001', headword: 'ŋgɨ³³', pronunciation: 'ŋgɨ˧˧（低平调）', partOfSpeech: '名词', definition: '山间常年不涸的小水潭；也用来比喻安静而可靠的人。',
@@ -24,7 +29,12 @@ const seedEntries = (): DictionaryEntry[] => [
       { id: 'src-1', title: '北坡方言词汇表', citation: '李某某记录，1987，手稿第 42 页', url: '' },
       { id: 'src-2', title: '嘎木村发音人访谈', citation: '录音 A-2018-04-17，00:12:31', url: '' }
     ],
-    synonyms: ['水潭', '泉水'], status: 'confirmed', notes: '声调标音经两位发音人复核。', createdAt: '2024-08-11T04:00:00.000Z', updatedAt: '2025-03-09T06:12:00.000Z', reviewerComments: []
+    synonyms: ['水潭', '泉水'], status: 'confirmed', notes: '声调标音经两位发音人复核。', createdAt: '2024-08-11T04:00:00.000Z', updatedAt: '2025-03-09T06:12:00.000Z',
+    reviewerComments: [{
+      id: 'c-3', field: 'definition', author: '主审·和老师', message: '比喻义“安静而可靠的人”建议补充使用语境限制。', status: 'resolved',
+      createdAt: '2025-03-02T03:00:00.000Z', resolvedAt: '2025-03-09T06:12:00.000Z', resolvedBy: '编辑·阿木',
+      replies: [{ id: 'r-2', author: '编辑·阿木', message: '已在释义中保留比喻义，后续例句会补充语境。', createdAt: '2025-03-09T06:10:00.000Z' }]
+    }]
   },
   {
     id: 'entry-002', headword: 'dʑa⁵⁵', pronunciation: 'dʑa˥（高平调）', partOfSpeech: '动词', definition: '把谷物摊开晾晒；引申为耐心等待事情成熟。',
@@ -105,16 +115,53 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     if (!entries.some((entry) => entry.id === selectedId.value)) selectedId.value = entries[0]?.id ?? '';
   }
 
-  function commit(action: string, detail: string, entryIds: string[], mutation: () => void) {
+  interface CommitContext {
+    versionId: string;
+    at: string;
+    /**
+     * 绑定字段发生有效修改时调用：把该字段下已解决的意见打回待回复，
+     * 保留原回复与解决时间，并记录是哪次修改触发的复审。词条若原为
+     * 已确认则同时回到待审。返回本次打回的意见数。
+     */
+    reopenResolvedComments: (entry: DictionaryEntry, field: string, fieldLabel: string, editDetail: string) => number;
+  }
+
+  function commit(action: string, detail: string, entryIds: string[], mutation: (context: CommitContext) => void) {
     undoStack.value = [...undoStack.value.slice(-49), snapshot()];
     redoStack.value = [];
     const before = clone(entries);
-    mutation();
+    const at = now();
+    const versionId = uid('version');
+    let finalDetail = detail;
+    const context: CommitContext = {
+      versionId,
+      at,
+      reopenResolvedComments: (entry, field, fieldLabel, editDetail) => {
+        const bound = entry.reviewerComments.filter((comment) => comment.field === field);
+        // 仅已解决意见会被打回；原本就待回复的意见不重复生成
+        const reopened = bound.filter((comment) => comment.status === 'resolved');
+        // 此前因修改回到待回复的意见，复审标记刷新为最近一次修改
+        const refreshed = bound.filter((comment) => comment.status === 'open' && Boolean(comment.reopenedByEdit));
+        if (!reopened.length && !refreshed.length) return 0;
+        [...reopened, ...refreshed].forEach((comment) => {
+          comment.status = 'open';
+          // 保留原回复、解决人和解决时间，仅记录本次触发复审的修改
+          comment.reopenedByEdit = { at, fieldLabel, versionId, versionDetail: editDetail };
+        });
+        const wasConfirmed = reopened.length > 0 && entry.status === 'confirmed';
+        if (wasConfirmed) entry.status = 'review';
+        if (reopened.length) {
+          finalDetail = `${editDetail}，${reopened.length} 条已解决意见因内容变更回到待回复${wasConfirmed ? '，已确认词条回到待审' : ''}`;
+        }
+        return reopened.length;
+      }
+    };
+    mutation(context);
     revision.value += 1;
-    entries.forEach((entry) => { if (entryIds.includes(entry.id)) entry.updatedAt = now(); });
-    versions.unshift({ id: uid('version'), at: now(), action, detail, entryId: entryIds[0], before });
+    entries.forEach((entry) => { if (entryIds.includes(entry.id)) entry.updatedAt = at; });
+    versions.unshift({ id: versionId, at, action, detail: finalDetail, entryId: entryIds[0], before });
     versions.splice(120);
-    audit.unshift({ id: uid('audit'), at: now(), action, detail, entryIds });
+    audit.unshift({ id: uid('audit'), at, action, detail: finalDetail, entryIds });
     audit.splice(300);
   }
 
@@ -126,10 +173,15 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     selectedId.value = entry.id;
   }
 
-  function updateField<K extends keyof DictionaryEntry>(entryId: string, field: K, value: DictionaryEntry[K], label = String(field)) {
+  function updateField<K extends keyof DictionaryEntry>(entryId: string, field: K, value: DictionaryEntry[K], label?: string) {
     const entry = entries.find((item) => item.id === entryId);
     if (!entry || JSON.stringify(entry[field]) === JSON.stringify(value)) return;
-    commit('编辑字段', `${label}发生更新`, [entryId], () => { entry[field] = value; });
+    const fieldLabel = label ?? FIELD_LABELS[field as string] ?? String(field);
+    const editDetail = `${fieldLabel}发生更新`;
+    commit('编辑字段', editDetail, [entryId], ({ reopenResolvedComments }) => {
+      entry[field] = value;
+      reopenResolvedComments(entry, field as string, fieldLabel, editDetail);
+    });
   }
 
   function setStatus(entryId: string, status: EntryStatus) {
@@ -143,73 +195,107 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     const entry = entries.find((item) => item.id === entryId);
     if (!entry) return;
     const variant = { id: uid('variant'), dialect: '', form: '', pronunciation: '', note: '' };
-    commit('新增方言变体', '添加一条方言变体', [entryId], () => entry.dialectVariants.push(variant));
+    const editDetail = '新增一条方言变体';
+    commit('新增方言变体', editDetail, [entryId], ({ reopenResolvedComments }) => {
+      entry.dialectVariants.push(variant);
+      reopenResolvedComments(entry, 'dialectVariants', FIELD_LABELS.dialectVariants, editDetail);
+    });
   }
 
   function updateVariant(entryId: string, variantId: string, field: 'dialect' | 'form' | 'pronunciation' | 'note', value: string) {
     const entry = entries.find((item) => item.id === entryId);
     const variant = entry?.dialectVariants.find((item) => item.id === variantId);
     if (!entry || !variant || variant[field] === value) return;
-    commit('编辑方言变体', `${field}发生更新`, [entryId], () => { variant[field] = value; });
+    const editDetail = `方言变体${field}发生更新`;
+    commit('编辑方言变体', editDetail, [entryId], ({ reopenResolvedComments }) => {
+      variant[field] = value;
+      reopenResolvedComments(entry, 'dialectVariants', FIELD_LABELS.dialectVariants, editDetail);
+    });
   }
 
   function removeVariant(entryId: string, variantId: string) {
     const entry = entries.find((item) => item.id === entryId);
     if (!entry) return;
-    commit('删除方言变体', '移除一条方言变体', [entryId], () => {
+    const editDetail = '移除一条方言变体';
+    commit('删除方言变体', editDetail, [entryId], ({ reopenResolvedComments }) => {
       const index = entry.dialectVariants.findIndex((variant) => variant.id === variantId);
       if (index >= 0) entry.dialectVariants.splice(index, 1);
+      reopenResolvedComments(entry, 'dialectVariants', FIELD_LABELS.dialectVariants, editDetail);
     });
   }
 
   function addExample(entryId: string) {
     const entry = entries.find((item) => item.id === entryId);
     if (!entry) return;
-    commit('新增例句', '添加一条例句', [entryId], () => entry.examples.push({ id: uid('example'), text: '', translation: '', source: '' }));
+    const editDetail = '新增一条例句';
+    commit('新增例句', editDetail, [entryId], ({ reopenResolvedComments }) => {
+      entry.examples.push({ id: uid('example'), text: '', translation: '', source: '' });
+      reopenResolvedComments(entry, 'examples', FIELD_LABELS.examples, editDetail);
+    });
   }
 
   function updateExample(entryId: string, exampleId: string, field: 'text' | 'translation' | 'source', value: string) {
     const entry = entries.find((item) => item.id === entryId);
     const example = entry?.examples.find((item) => item.id === exampleId);
     if (!entry || !example || example[field] === value) return;
-    commit('编辑例句', `${field}发生更新`, [entryId], () => { example[field] = value; });
+    const editDetail = `例句${field}发生更新`;
+    commit('编辑例句', editDetail, [entryId], ({ reopenResolvedComments }) => {
+      example[field] = value;
+      reopenResolvedComments(entry, 'examples', FIELD_LABELS.examples, editDetail);
+    });
   }
 
   function removeExample(entryId: string, exampleId: string) {
     const entry = entries.find((item) => item.id === entryId);
     if (!entry) return;
-    commit('删除例句', '移除一条例句', [entryId], () => {
+    const editDetail = '移除一条例句';
+    commit('删除例句', editDetail, [entryId], ({ reopenResolvedComments }) => {
       const index = entry.examples.findIndex((item) => item.id === exampleId);
       if (index >= 0) entry.examples.splice(index, 1);
+      reopenResolvedComments(entry, 'examples', FIELD_LABELS.examples, editDetail);
     });
   }
 
   function addSource(entryId: string) {
     const entry = entries.find((item) => item.id === entryId);
     if (!entry) return;
-    commit('新增来源', '添加一条文献或录音来源', [entryId], () => entry.sources.push({ id: uid('source'), title: '', citation: '', url: '' }));
+    const editDetail = '新增一条文献或录音来源';
+    commit('新增来源', editDetail, [entryId], ({ reopenResolvedComments }) => {
+      entry.sources.push({ id: uid('source'), title: '', citation: '', url: '' });
+      reopenResolvedComments(entry, 'sources', FIELD_LABELS.sources, editDetail);
+    });
   }
 
   function updateSource(entryId: string, sourceId: string, field: 'title' | 'citation' | 'url', value: string) {
     const entry = entries.find((item) => item.id === entryId);
     const source = entry?.sources.find((item) => item.id === sourceId);
     if (!entry || !source || source[field] === value) return;
-    commit('编辑来源', `${field}发生更新`, [entryId], () => { source[field] = value; });
+    const editDetail = `来源${field}发生更新`;
+    commit('编辑来源', editDetail, [entryId], ({ reopenResolvedComments }) => {
+      source[field] = value;
+      reopenResolvedComments(entry, 'sources', FIELD_LABELS.sources, editDetail);
+    });
   }
 
   function removeSource(entryId: string, sourceId: string) {
     const entry = entries.find((item) => item.id === entryId);
     if (!entry) return;
-    commit('删除来源', '移除一条来源', [entryId], () => {
+    const editDetail = '移除一条来源';
+    commit('删除来源', editDetail, [entryId], ({ reopenResolvedComments }) => {
       const index = entry.sources.findIndex((source) => source.id === sourceId);
       if (index >= 0) entry.sources.splice(index, 1);
+      reopenResolvedComments(entry, 'sources', FIELD_LABELS.sources, editDetail);
     });
   }
 
   function setSynonyms(entryId: string, synonyms: string[]) {
     const entry = entries.find((item) => item.id === entryId);
-    if (!entry) return;
-    commit('编辑同义词', `同义词更新为 ${synonyms.join('、')}`, [entryId], () => { entry.synonyms = synonyms; });
+    if (!entry || JSON.stringify(entry.synonyms) === JSON.stringify(synonyms)) return;
+    const editDetail = `同义词更新为 ${synonyms.join('、') || '（空）'}`;
+    commit('编辑同义词', editDetail, [entryId], ({ reopenResolvedComments }) => {
+      entry.synonyms = synonyms;
+      reopenResolvedComments(entry, 'synonyms', FIELD_LABELS.synonyms, editDetail);
+    });
   }
 
   function addComment(entryId: string, field: string, message: string, author = '主审·和老师') {
@@ -223,15 +309,26 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     const entry = entries.find((item) => item.id === entryId);
     const comment = entry?.reviewerComments.find((item) => item.id === commentId);
     if (!entry || !comment || !message.trim()) return;
-    commit('回复审校意见', `回复“${comment.field}”字段意见`, [entryId], () => comment.replies.push({ id: uid('reply'), author, message: message.trim(), createdAt: now() }));
+    commit('回复审校意见', `回复“${comment.field}”字段意见`, [entryId], ({ at }) => comment.replies.push({ id: uid('reply'), author, message: message.trim(), createdAt: at }));
   }
 
   function toggleComment(entryId: string, commentId: string) {
     const entry = entries.find((item) => item.id === entryId);
     const comment = entry?.reviewerComments.find((item) => item.id === commentId);
     if (!entry || !comment) return;
-    commit('处理审校意见', comment.status === 'open' ? '标记为已解决' : '重新打开意见', [entryId], () => {
-      comment.status = comment.status === 'open' ? 'resolved' : 'open';
+    const resolving = comment.status === 'open';
+    commit('处理审校意见', resolving ? '标记为已解决' : '重新打开意见', [entryId], ({ at }) => {
+      if (resolving) {
+        comment.status = 'resolved';
+        comment.resolvedAt = at;
+        comment.resolvedBy = '编辑·阿木';
+        comment.reopenedByEdit = undefined;
+      } else {
+        comment.status = 'open';
+        comment.resolvedAt = undefined;
+        comment.resolvedBy = undefined;
+        comment.reopenedByEdit = undefined;
+      }
     });
   }
 

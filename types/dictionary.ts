@@ -22,6 +22,13 @@ export interface DictionarySource {
   url: string;
 }
 
+export interface ReopenedByEdit {
+  at: string;
+  fieldLabel: string;
+  versionId: string;
+  versionDetail: string;
+}
+
 export interface ReviewComment {
   id: string;
   field: string;
@@ -29,6 +36,9 @@ export interface ReviewComment {
   message: string;
   status: 'open' | 'resolved';
   createdAt: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  reopenedByEdit?: ReopenedByEdit;
   replies: Array<{ id: string; author: string; message: string; createdAt: string }>;
 }
 

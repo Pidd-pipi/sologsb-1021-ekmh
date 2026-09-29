@@ -11,7 +11,7 @@ const eventValue = (event: any) => typeof event === 'string' || typeof event ===
 
 const commitInput = (event: any, field: 'headword' | 'pronunciation' | 'partOfSpeech' | 'definition' | 'notes') => {
   if (!entry.value) return;
-  store.updateField(entry.value.id, field, eventValue(event), field);
+  store.updateField(entry.value.id, field, eventValue(event));
 };
 </script>
 
